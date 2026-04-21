@@ -101,7 +101,7 @@ cloudformation/iam-roles.yaml
 
 ## Background
 
-Built from experience running HIPAA-compliant AWS infrastructure at Baxter International — where 99.99% uptime and regulatory compliance were non-negotiable. This pipeline applies those same standards to any AWS environment.
+Built from experience running HIPAA-compliant AWS infrastructure - where 99.99% uptime and regulatory compliance were non-negotiable. This pipeline applies those same standards to any AWS environment.
 
 ---
 
