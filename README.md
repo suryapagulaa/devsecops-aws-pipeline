@@ -1,6 +1,6 @@
 # devsecops-aws-pipeline
 
-A production-grade DevSecOps pipeline for AWS infrastructure — shift-left security scanning integrated into CI/CD from day one.
+A production-grade DevSecOps pipeline for AWS infrastructure - shift-left security scanning integrated into CI/CD from day one.
 
 ## What this does
 
