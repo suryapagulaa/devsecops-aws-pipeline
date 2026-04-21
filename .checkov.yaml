@@ -1,0 +1,16 @@
+# .checkov.yaml
+# Checkov configuration — controls what gets checked and what gets skipped.
+# See https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html
+
+compact: true
+quiet: false
+
+# Checks to skip — add IDs here with a justification comment
+skip-check:
+  # CKV_AWS_18: S3 access logging — we use central log bucket, not per-bucket
+  # - CKV_AWS_18
+
+# Hard fail on any result (remove to soft-fail)
+hard-fail-on:
+  - CRITICAL
+  - HIGH

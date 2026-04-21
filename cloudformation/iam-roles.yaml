@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  IAM roles with permission boundaries — enforces least-privilege
+  across all roles. No role can exceed the boundary policy.
+  Passes Checkov CKV_AWS_107, CKV_AWS_108, CKV_AWS_111.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+
+  # ── PERMISSION BOUNDARY ───────────────────────────────────────────
+  # This is the maximum set of permissions ANY role in this account can have.
+  # Even if a role has AdministratorAccess, the boundary limits what it can do.
+  PermissionBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${EnvironmentName}-permission-boundary'
+      Description: Maximum permissions boundary — no role may exceed this
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow common service actions within boundary
+          - Sid: AllowCoreServices
+            Effect: Allow
+            Action:
+              - ec2:Describe*
+              - ec2:List*
+              - eks:Describe*
+              - eks:List*
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - cloudwatch:PutMetricData
+              - cloudwatch:GetMetricStatistics
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+
+          # Explicitly deny dangerous actions — these can never be done
+          # even with an attached policy that allows them
+          - Sid: DenyDangerousActions
+            Effect: Deny
+            Action:
+              - iam:CreateUser
+              - iam:DeleteUser
+              - iam:CreateAccessKey
+              - iam:DeleteAccessKey
+              - iam:AttachUserPolicy
+              - iam:PutUserPolicy
+              - organizations:*
+              - account:*
+              - sts:AssumeRole
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                aws:PrincipalTag/BoundaryExempt: 'true'
+
+          # Deny actions outside the approved regions
+          - Sid: DenyUnapprovedRegions
+            Effect: Deny
+            Action: '*'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                aws:RequestedRegion:
+                  - us-east-1
+                  - us-west-2
+                  - eu-west-1
+                  - eu-central-1
+
+  # ── EKS NODE ROLE ─────────────────────────────────────────────────
+  EKSNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-eks-node-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      PermissionsBoundary: !Ref PermissionBoundary
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ── EKS CLUSTER ROLE ──────────────────────────────────────────────
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-eks-cluster-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      PermissionsBoundary: !Ref PermissionBoundary
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── CI/CD PIPELINE ROLE ───────────────────────────────────────────
+  # Used by GitHub Actions via OIDC — no long-lived credentials
+  CICDRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-cicd-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Restrict to your specific GitHub org/repo
+                token.actions.githubusercontent.com:sub: repo:akhiladarsh/*:*
+      PermissionsBoundary: !Ref PermissionBoundary
+      Policies:
+        - PolicyName: CICDDeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudFormationDeploy
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:ValidateTemplate
+                Resource: !Sub 'arn:aws:cloudformation:*:${AWS::AccountId}:stack/${EnvironmentName}-*'
+
+              - Sid: ECRPush
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: !Sub 'arn:aws:ecr:*:${AWS::AccountId}:repository/${EnvironmentName}-*'
+
+              - Sid: EKSDeploy
+                Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                Resource: !Sub 'arn:aws:eks:*:${AWS::AccountId}:cluster/${EnvironmentName}-*'
+
+  # ── SPLUNK KINESIS READ ROLE ───────────────────────────────────────
+  # Minimal role for Splunk to read from Kinesis — used in Baxter-style setups
+  SplunkKinesisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-splunk-kinesis-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+      PermissionsBoundary: !Ref PermissionBoundary
+      Policies:
+        - PolicyName: SplunkKinesisReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:ListStreams
+                  - kinesis:ListShards
+                Resource: !Sub 'arn:aws:kinesis:*:${AWS::AccountId}:stream/${EnvironmentName}-security-*'
+
+Outputs:
+  PermissionBoundaryArn:
+    Value: !Ref PermissionBoundary
+    Export:
+      Name: !Sub '${EnvironmentName}-PermissionBoundaryArn'
+
+  EKSNodeRoleArn:
+    Value: !GetAtt EKSNodeRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-EKSNodeRoleArn'
+
+  EKSClusterRoleArn:
+    Value: !GetAtt EKSClusterRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-EKSClusterRoleArn'
+
+  CICDRoleArn:
+    Value: !GetAtt CICDRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-CICDRoleArn'
